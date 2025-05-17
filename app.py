@@ -1,9 +1,12 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template
 import google.generativeai as genai
+from dotenv import load_dotenv
 import requests
 import os
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
+
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -19,7 +22,7 @@ def buscar_jogos():
     hoje = datetime.now(timezone(timedelta(hours=-3)))  # Usar o fuso horário de Brasília
     data_formatada = hoje.strftime("%Y-%m-%d")
     url = f"https://api.api-futebol.com.br/v1/campeonatos?data_inicio={data_formatada}&data_fim={data_formatada}"
-    headers = {"Authorization": "Bearer YOUR_API_KEY"}  # Substitua YOUR_API_KEY pela sua chave da API Futebol
+    headers = {"Authorization": "Bearer live_1074c1cd7b14f4e1e24c790590cc2a"}  # Substitua YOUR_API_KEY pela sua chave da API Futebol
 
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
@@ -161,6 +164,12 @@ def buscar_logo_emissora(nome_emissora):
   except Exception as e:
       print(f"Erro ao buscar logo da emissora {nome_emissora}: {e}")
       return ""
+
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
 
 if __name__ == '__main__':
     app.run(debug=True)
