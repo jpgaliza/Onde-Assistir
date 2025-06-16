@@ -1,175 +1,172 @@
-from flask import Flask, jsonify, render_template
-import google.generativeai as genai
-from dotenv import load_dotenv
-import requests
 import os
-from datetime import datetime, timezone, timedelta
-from urllib.parse import quote
+import google.generativeai as genai
+from flask import Flask, render_template, jsonify
+from dotenv import load_dotenv
+import traceback # Para logging detalhado de erros
+from datetime import datetime # Para obter a data atual
+import locale               # Para formatar a data em português
 
+# Tenta configurar o locale para Português do Brasil para formatar a data
+# Isso garante que o nome do mês e dia da semana saiam em português.
+try:
+    # Para Linux/macOS:
+    locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
+except locale.Error:
+    try:
+        # Para Windows:
+        locale.setlocale(locale.LC_TIME, 'Portuguese_Brazil')
+    except locale.Error:
+        print("Aviso: Não foi possível configurar o locale para pt_BR. A data pode não ser formatada em português.")
+        # Se falhar, a data será formatada no padrão do sistema ou em inglês.
+
+# Carrega as variáveis de ambiente do arquivo .env
 load_dotenv()
 
 app = Flask(__name__)
 
-# Configurar a API key do Gemini
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("A variável de ambiente GOOGLE_API_KEY não está definida.")
-genai.configure(api_key=GOOGLE_API_KEY)
-modelo = genai.GenerativeModel("gemini-pro")
+# Configuração da API Gemini com Google Search Grounding
+gemini_model = None
+gemini_initialization_error = None
+model_name_for_log = 'gemini-1.5-flash' # Modelo com excelente suporte a ferramentas
 
-# Função para buscar os jogos do dia
-def buscar_jogos():
-    hoje = datetime.now(timezone(timedelta(hours=-3)))  # Usar o fuso horário de Brasília
-    data_formatada = hoje.strftime("%Y-%m-%d")
-    url = f"https://api.api-futebol.com.br/v1/campeonatos?data_inicio={data_formatada}&data_fim={data_formatada}"
-    headers = {"Authorization": "Bearer live_1074c1cd7b14f4e1e24c790590cc2a"}  # Substitua YOUR_API_KEY pela sua chave da API Futebol
+try:
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        gemini_initialization_error = "A variável de ambiente GOOGLE_API_KEY não foi encontrada no arquivo .env. Verifique o nome da variável e do arquivo."
+    else:
+        genai.configure(api_key=api_key)
+        
+        # Configurar o modelo Gemini com Google Search
+        gemini_model = genai.GenerativeModel(
+            model_name=model_name_for_log,
+            tools='google_search_retrieval'  # Habilita Google Search
+        )
+        
+        print(f"API Gemini configurada com sucesso usando o modelo: {model_name_for_log}")
+        print("🔍 Google Search Grounding ATIVADO - Informações em tempo real habilitadas!")
+except Exception as e:
+    gemini_initialization_error = f"Falha ao configurar a API Gemini: {e}"
 
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(f"Erro ao buscar jogos: {response.status_code}")
-        return []
-
-    campeonatos = response.json()['data']
-    jogos_do_dia = []
-
-    # Filtra os campeonatos de interesse
-    campeonatos_brasileiros = [c for c in campeonatos if "Campeonato Brasileiro" in c['nome']]
-    campeonatos_brasileiros = [c for c in campeonatos if "Campeonato Brasileiro Série B" in c['nome']]
-    libertadores = [c for c in campeonatos if "Libertadores" in c['nome']]
-    sulamericana = [c for c in campeonatos if "Sul-Americana" in c['nome']]
-    copa_brasil = [c for c in campeonatos if "Copa do Brasil" in c['nome']]
-    premier_league = [c for c in campeonatos if "Premier League" in c['nome']]
-
-    campeonatos_filtrados = (
-        campeonatos_brasileiros + libertadores + sulamericana + copa_brasil + premier_league
-    )
-
-    for campeonato in campeonatos_filtrados:
-        url_campeonato = f"https://api.api-futebol.com.br/v1/campeonatos/{campeonato['id']}"
-        response_campeonato = requests.get(url_campeonato, headers=headers)
-
-        if response_campeonato.status_code == 200:
-            dados_campeonato = response_campeonato.json()['data']
-            fase_atual = dados_campeonato.get('fase_atual', None)
-
-            if fase_atual:
-                url_jogos = f"https://api.api-futebol.com.br/v1/fases/{fase_atual['id']}/jogos"
-                response_jogos = requests.get(url_jogos, headers=headers)
-
-                if response_jogos.status_code == 200:
-                    jogos = response_jogos.json()['data']
-                    for jogo in jogos:
-                        if jogo['status'] != 'Finalizado' and jogo['status'] != 'Cancelado':
-                            hora_str = jogo['horario_jogo']
-                            try:
-                                hora_jogo = datetime.strptime(hora_str, "%Y-%m-%d %H:%M:%S")
-                                hora_local = hora_jogo.astimezone(timezone(timedelta(hours=-3)))
-                                hora_formatada = hora_local.strftime("%Hh%M")
-                            except ValueError:
-                                hora_formatada = "Horário Indefinido"
-
-                            jogo_info = {
-                                "time1": jogo['time_mandante']['nome_popular'],
-                                "time2": jogo['time_visitante']['nome_popular'],
-                                "escudo1": jogo['time_mandante']['escudo'],
-                                "escudo2": jogo['time_visitante']['escudo'],
-                                "campeonato": campeonato['nome'],
-                                "hora": hora_formatada,
-                            }
-                            jogos_do_dia.append(jogo_info)
-        else:
-            print(f"Erro ao buscar detalhes do campeonato {campeonato['nome']}: {response_campeonato.status_code}")
-
-    return jogos_do_dia
-
-def buscar_transmissao(jogo):
-    prompt = f"Qual emissora transmite o jogo de futebol {jogo['time1']} x {jogo['time2']}?"
-    response = modelo.generate_content(prompt, tools=[{"google_search": {}}])
-    return response.text
-
-@app.route('/jogos')
-def listar_jogos():
-    jogos = buscar_jogos()
-    if not jogos:
-        return jsonify({"error": "Não há jogos disponíveis para hoje."})
-
-    resultados = []
-    for jogo in jogos:
-        try:
-            transmissao = buscar_transmissao(jogo)
-            # Tenta extrair o nome da emissora de forma mais robusta
-            emissora_nome = ""
-            if "transmitido" in transmissao.lower():
-              emissora_nome = transmissao.lower().split("transmitido por")[-1].split('.')[0].strip()
-            elif "passa em" in transmissao.lower():
-                emissora_nome = transmissao.lower().split("passa em")[-1].split('.')[0].strip()
-            elif "vai passar em" in transmissao.lower():
-                emissora_nome = transmissao.lower().split("vai passar em")[-1].split('.')[0].strip()
-            else:
-              emissora_nome = transmissao
-
-            emissora_nome = emissora_nome.title() # Capitaliza para ficar mais apresentável
-
-            emissora_imagem_url = buscar_logo_emissora(emissora_nome) # Busca o logo
-
-            resultados.append({
-                "time1": jogo['time1'],
-                "time2": jogo['time2'],
-                "escudo1": jogo['escudo1'],
-                "escudo2": jogo['escudo2'],
-                "campeonato": jogo['campeonato'],
-                "hora": jogo['hora'],
-                "emissora": emissora_nome,
-                "emissora_imagem": emissora_imagem_url, # Adiciona a URL da imagem
-            })
-        except Exception as e:
-            print(f"Erro ao buscar transmissão do jogo {jogo['time1']} x {jogo['time2']}: {e}")
-            resultados.append({
-                "time1": jogo['time1'],
-                "time2": jogo['time2'],
-                "escudo1": jogo['escudo1'],
-                "escudo2": jogo['escudo2'],
-                "campeonato": jogo['campeonato'],
-                "hora": jogo['hora'],
-                "emissora": "Informação não disponível",
-                "emissora_imagem": "",
-            })
-
-    return jsonify(resultados)
-
-def buscar_logo_emissora(nome_emissora):
-  """
-  Busca a URL do logo de uma emissora de TV usando a API do Google Search.
-
-  Args:
-    nome_emissora: Nome da emissora (string).
-
-  Returns:
-    URL do logo da emissora (string) ou None se não encontrar.
-  """
-  try:
-      nome_emissora_encoded = quote(nome_emissora)
-      url = f"https://www.google.com/search?q={nome_emissora_encoded}+logo&tbm=isch"
-      response = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"})
-      response.raise_for_status()  # Lança uma exceção para status de erro
-
-      # Tenta encontrar a URL da imagem na resposta HTML
-      # Esta é uma maneira simplificada e pode precisar de ajustes dependendo da estrutura do Google Search
-      import re
-      match = re.search(r"img.*?src=\"(https?://.*?)\"", response.text)
-      if match:
-          return match.group(1)
-      else:
-        return ""
-  except Exception as e:
-      print(f"Erro ao buscar logo da emissora {nome_emissora}: {e}")
-      return ""
-
+if gemini_initialization_error:
+    print(f"ALERTA CRÍTICO: {gemini_initialization_error}")
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
+@app.route('/buscar-jogos')
+def buscar_jogos():
+    if gemini_initialization_error or not gemini_model:
+        print(f"Erro na rota /buscar-jogos: API Gemini não inicializada. Erro: {gemini_initialization_error}")
+        return jsonify(error=f"Erro de configuração da API Gemini: {gemini_initialization_error}"), 500
+    
+    try:
+        # Obter a data atual
+        now = datetime.now()
+        # Formatar a data para um formato legível em português
+        # Ex: "sexta-feira, 23 de maio de 2025"
+        try:
+            current_date_formatted = now.strftime("%A, %d de %B de %Y")
+        except UnicodeEncodeError: # Algumas configurações de locale em Windows podem dar erro com strftime e acentos
+            print("Aviso: Erro de encoding ao formatar data com locale. Tentando formato alternativo.")
+            current_date_formatted = now.strftime("%Y-%m-%d") # Formato ISO como fallback seguro
+        except Exception as e_date: # Qualquer outra exceção na formatação
+            print(f"Aviso: Falha ao formatar data com locale ({e_date}). Usando formato YYYY-MM-DD.")
+            current_date_formatted = now.strftime("%Y-%m-%d")
+
+        print(f"Data atual formatada para o prompt: {current_date_formatted}")        # Prompt otimizado para Google Search em tempo real
+        prompt = (
+            f"🔍 BUSQUE NO GOOGLE informações ATUALIZADAS sobre jogos de futebol para HOJE - {current_date_formatted} "
+            f"(16 de junho de 2025, domingo - fuso horário de Brasília/BRT GMT-3).\n\n"
+            
+            "📊 **TERMOS DE BUSCA ESPECÍFICOS:**\n"
+            "- 'jogos de futebol hoje 16 junho 2025'\n"
+            "- 'futebol domingo transmissão TV Brasil'\n"
+            "- 'onde assistir jogos hoje Globo SBT ESPN'\n"
+            "- 'brasileirão libertadores jogos domingo'\n"
+            "- 'futebol europeu transmissão Brasil hoje'\n\n"
+            
+            "🎯 **ENCONTRE ESPECIFICAMENTE:**\n"
+            "1. ⚽ JOGOS CONFIRMADOS para 16/06/2025 (domingo)\n"
+            "2. 🕐 HORÁRIOS EXATOS em BRT (GMT-3)\n"
+            "3. 📺 CANAIS DE TV: Globo, SBT, Band, Record, ESPN, Fox Sports, SportTV\n"
+            "4. 📱 STREAMING: Globoplay, Paramount+, Amazon Prime Video, Disney+, Apple TV+\n"
+            "5. 🏆 CAMPEONATOS: Brasileirão, Copa do Brasil, Libertadores, Champions League, Premier League, La Liga\n\n"
+            
+            "� **FORMATO DA RESPOSTA:**\n"
+            "Para cada jogo encontrado:\n"
+            "🕐 **[HORÁRIO BRT]** - **[TIME A] x [TIME B]**\n"
+            "🏆 **Campeonato:** [Nome completo]\n"
+            "📺 **Onde assistir:** [TV/Streaming]\n"
+            "📍 **Local:** [Estádio - Cidade]\n"
+            "➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
+            
+            "⚠️ **INSTRUÇÕES CRÍTICAS:**\n"
+            "- Use APENAS informações encontradas no Google Search\n"
+            "- Confirme os dados em sites oficiais como GloboEsporte, ESPN, SportTV\n"
+            "- Priorize jogos com times brasileiros\n"
+            "- Se NÃO encontrar jogos hoje, seja claro: 'Não há jogos confirmados para hoje'\n"
+            "- Inclua links das fontes consultadas\n\n"
+            
+            f"🔍 **BUSQUE AGORA** informações atualizadas para {current_date_formatted}!"
+        )
+        
+        print(f"🔍 Enviando busca GOOGLE SEARCH para Gemini: {current_date_formatted}")
+        
+        response_gemini = gemini_model.generate_content(prompt)
+        print("✅ Resposta recebida do Google Search via Gemini!")        # Tratamento para respostas bloqueadas ou vazias da Gemini API
+        if not response_gemini.parts: # Verifica se há partes na resposta
+            feedback = getattr(response_gemini, 'prompt_feedback', None)
+            block_reason_message = "A API Gemini retornou uma resposta vazia ou sem conteúdo."
+            if feedback and getattr(feedback, 'block_reason', None): # Verifica se foi bloqueado e qual a razão
+                block_reason_message = f"Conteúdo bloqueado pela API Gemini. Razão: {feedback.block_reason}"
+            
+            print(f"Aviso API Gemini: {block_reason_message}")
+            # Retorna a mensagem para o usuário
+            return jsonify(jogos=f"Não foi possível obter os dados dos jogos: {block_reason_message}")
+
+        game_info_text = response_gemini.text
+        if not game_info_text or not game_info_text.strip(): # Verifica se o texto está vazio
+            game_info_text = f"❌ Nenhuma informação de jogos encontrada para {current_date_formatted} através do Google Search."
+        
+        # Adiciona cabeçalho informativo
+        header_info = f"🔍 **BUSCA REALIZADA VIA GOOGLE SEARCH**\n"
+        header_info += f"📅 **Data consultada:** {current_date_formatted}\n"
+        header_info += f"🕐 **Horário da consulta:** {datetime.now().strftime('%H:%M:%S')} BRT\n"
+        header_info += f"➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
+        
+        # Adiciona rodapé informativo
+        footer_info = "\n\n➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖➖\n"
+        footer_info += "� **Informações obtidas via Google Search em tempo real**\n"
+        footer_info += "⚠️ **IMPORTANTE:** Verifique horários e canais nos sites oficiais antes dos jogos\n"
+        footer_info += "📱 **Sugestão:** Consulte também ESPN, GloboEsporte, SportTV para confirmação"
+        
+        final_response = header_info + game_info_text + footer_info
+        
+        print("🎯 Dados dos jogos formatados com Google Search Grounding.")
+        return jsonify(jogos=final_response)
+
+    except Exception as e:
+        print(f"Erro crítico na rota /buscar-jogos: {type(e).__name__} - {e}")
+        print(traceback.format_exc()) # Imprime o stack trace completo no console do servidor
+        return jsonify(error=f"Erro interno ao processar sua solicitação. Verifique os logs do servidor para mais detalhes."), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Alerta inicial se a chave não estiver configurada ou se houve erro na inicialização do Gemini
+    if not os.getenv("GOOGLE_API_KEY") or gemini_initialization_error: # Verifica ambas as condições
+        print("---------------------------------------------------------")
+        print("ALERTA IMPORTANTE:")
+        # Mostra o erro de inicialização se houver, senão a mensagem de chave API
+        print(gemini_initialization_error if gemini_initialization_error else "A chave API do Google (GOOGLE_API_KEY) não está configurada no arquivo .env.")
+        print("A aplicação pode não funcionar corretamente.")
+        print("---------------------------------------------------------")
+    else:
+        print("---------------------------------------------------------")
+        print("🚀 APLICAÇÃO INICIALIZADA COM SUCESSO!")
+        print("✅ Google Gemini API configurada")
+        print("🔍 Google Search Grounding ATIVADO")
+        print("📺 Pronto para buscar jogos EM TEMPO REAL!")
+        print("---------------------------------------------------------")
+    
+    # Executa o servidor Flask
+    app.run(debug=True, host='0.0.0.0', port=5000)

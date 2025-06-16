@@ -45,15 +45,18 @@
             loadingIndicator.style.display = 'block'; // Mostra o indicador de carregamento
             atualizarJogosButton.disabled = true; // Desabilita o botão enquanto carrega
 
-            fetch('/jogos')
+            fetch('/buscar-jogos')
                 .then(response => response.json())
                 .then(data => {
                     loadingIndicator.style.display = 'none'; // Esconde o indicador de carregamento
                     atualizarJogosButton.disabled = false; // Reabilita o botão
                     if (data.error) {
                         jogosContainer.innerHTML = `<div class="text-center text-red-500">${data.error}</div>`;
+                    } else if (data.jogos && typeof data.jogos === 'string') {
+                        // Cria um elemento <pre> para mostrar o texto formatado pela Gemini
+                        jogosContainer.innerHTML = `<pre class="text-left whitespace-pre-wrap p-4 bg-white rounded-lg shadow-md">${data.jogos}</pre>`;
                     } else {
-                        exibirJogos(data);
+                        jogosContainer.innerHTML = `<div class="text-center text-gray-500">Nenhuma informação de jogo encontrada ou formato inesperado.</div>`;
                     }
                 })
                 .catch(error => {
@@ -102,5 +105,6 @@
             });
         }
     </script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>
